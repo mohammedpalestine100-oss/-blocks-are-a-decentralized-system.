@@ -14,9 +14,9 @@ public class App {
         System.out.println("Bob:   " + bob.getAddress());
         System.out.println("Miner: " + miner.getAddress());
 
-        // Bootstrap: miner mines an empty block to get first reward
+        // Bootstrap: miner mines an empty block to get first reward (coinbase)
         bc.minePendingTransactions(miner.getPublicKey());
-        System.out.printf("Miner balance: %.2f\n", bc.getBalance(miner.getPublicKey()));
+        System.out.printf("Miner balance: %.2f%n", bc.getBalance(miner.getPublicKey()));
 
         // Miner sends some to Alice & Bob
         Transaction t1 = miner.sendFunds(alice.getPublicKey(), 25.0);
@@ -28,18 +28,19 @@ public class App {
         System.out.println("Mining block with txs...");
         bc.minePendingTransactions(miner.getPublicKey());
 
-        System.out.printf("Alice balance: %.2f\n", bc.getBalance(alice.getPublicKey()));
-        System.out.printf("Bob balance:   %.2f\n", bc.getBalance(bob.getPublicKey()));
-        System.out.printf("Miner balance: %.2f\n", bc.getBalance(miner.getPublicKey()));
+        System.out.printf("Alice balance: %.2f%n", bc.getBalance(alice.getPublicKey()));
+        System.out.printf("Bob balance:   %.2f%n", bc.getBalance(bob.getPublicKey()));
+        System.out.printf("Miner balance: %.2f%n", bc.getBalance(miner.getPublicKey()));
 
         System.out.println("Chain valid? " + bc.isValid());
-        for (int i=0;i<bc.getChain().size();i++) {
-            System.out.println("#"+i+" "+bc.getChain().get(i));
+        for (int i = 0; i < bc.getChain().size(); i++) {
+            System.out.println("#" + i + " " + bc.getChain().get(i));
         }
     }
+
+
+    
 }
-
-
 package com.decentra.chain;
 
 import java.util.ArrayList;
@@ -59,6 +60,7 @@ public class Block {
         this.previousHash = previousHash;
         this.timeStamp = System.currentTimeMillis();
         this.nonce = 0;
+
         List<String> txHashes = new ArrayList<>();
         for (Transaction t : this.transactions) {
             txHashes.add(t.getTxId());
@@ -81,7 +83,8 @@ public class Block {
 
     public boolean validateTransactions() {
         for (Transaction t : transactions) {
-            if (!t.verify()) return false;
+            // coinbase لا تحتاج توقيع
+            if (!t.isCoinbase() && !t.verify()) return false;
         }
         return true;
     }
@@ -94,7 +97,7 @@ public class Block {
     public List<Transaction> getTransactions(){ return new ArrayList<>(transactions); }
 
     @Override public String toString() {
-        return "Block{hash="+hash.substring(0,12)+".., txs="+transactions.size()+", ts="+new Date(timeStamp)+"}";
+        return "Block{hash=" + hash.substring(0, 12) + ".., txs=" + transactions.size() + ", ts=" + new Date(timeStamp) + "}";
     }
 }
 
@@ -124,20 +127,31 @@ public class Blockchain {
 
     public void addTransaction(Transaction tx) {
         if (tx == null) throw new IllegalArgumentException("tx null");
-        if (!tx.verify()) throw new IllegalArgumentException("Invalid signature");
+        if (!tx.isCoinbase() && !tx.verify()) throw new IllegalArgumentException("Invalid signature");
+
+        // (اختياري قوي) منع الصرف الزائد بشكل بسيط: الرصيد الحالي - المعلّقات
+        if (!tx.isCoinbase()) {
+            double available = getBalance(tx.getFrom());
+            double pendingOut = 0.0;
+            for (Transaction p : pending) {
+                if (p.getFrom() != null && p.getFrom().equals(tx.getFrom())) {
+                    pendingOut += p.getAmount();
+                }
+            }
+            if (available - pendingOut < tx.getAmount()) {
+                throw new IllegalArgumentException("Insufficient funds");
+            }
+        }
         pending.add(tx);
     }
 
     public Block minePendingTransactions(PublicKey miner) {
-        // reward
-        Transaction reward = Transaction.createAndSign(
-            // self-signed reward by "system" - using miner key to sign simplifies demo
-            // In production, a protocol rule mints reward without signature verification
-            nullSafePrivateKey(), miner, miner, miningReward
-        );
-        // For reward we bypass signature verify (or consider it valid)
+        // مكافأة coinbase (from=null، بدون توقيع)
+        Transaction reward = Transaction.createCoinbase(miner, miningReward);
+
         List<Transaction> pack = new ArrayList<>(pending);
         pack.add(reward);
+
         Block b = new Block(pack, getLatestBlock().getHash());
         b.mineBlock(difficulty);
         chain.add(b);
@@ -145,19 +159,9 @@ public class Blockchain {
         return b;
     }
 
-    // Helper to create a "system" reward without a private key (no sig verify on reward)
-    private java.security.PrivateKey nullSafePrivateKey() {
-        // Not used for verification in demo; reward tx is accepted by rule
-        return new java.security.PrivateKey() {
-            public String getAlgorithm(){ return "NONE"; }
-            public String getFormat(){ return "NONE"; }
-            public byte[] getEncoded(){ return new byte[0]; }
-        };
-    }
-
     public boolean isValid() {
-        for (int i=1;i<chain.size();i++) {
-            Block cur = chain.get(i), prev = chain.get(i-1);
+        for (int i = 1; i < chain.size(); i++) {
+            Block cur = chain.get(i), prev = chain.get(i - 1);
             if (!cur.getHash().equals(cur.calculateHash())) return false;
             if (!cur.getPreviousHash().equals(prev.getHash())) return false;
             if (!cur.getHash().startsWith("0".repeat(difficulty))) return false;
@@ -168,9 +172,11 @@ public class Blockchain {
 
     public double getBalance(PublicKey address) {
         double bal = 0.0;
-        for (Block b : chain) for (Transaction t : b.getTransactions()) {
-            if (t.getFrom()!=null && t.getFrom().equals(address)) bal -= t.getAmount();
-            if (t.getTo()!=null && t.getTo().equals(address)) bal += t.getAmount();
+        for (Block b : chain) {
+            for (Transaction t : b.getTransactions()) {
+                if (t.getFrom() != null && t.getFrom().equals(address)) bal -= t.getAmount();
+                if (t.getTo()   != null && t.getTo().equals(address))   bal += t.getAmount();
+            }
         }
         return bal;
     }
@@ -231,7 +237,7 @@ import java.util.Base64;
 
 public class Transaction {
     private final String txId;
-    private final PublicKey from;
+    private final PublicKey from; // may be null for coinbase
     private final PublicKey to;
     private final double amount;
     private final byte[] signature;
@@ -242,6 +248,13 @@ public class Transaction {
         this.to = to;
         this.amount = amount;
         this.signature = signature;
+    }
+
+    // معاملة مكافأة بدون توقيع (from = null)
+    public static Transaction createCoinbase(PublicKey to, double amount) {
+        String payload = canonical(null, to, amount);
+        String txId = CryptoUtil.sha256(payload);
+        return new Transaction(txId, null, to, amount, new byte[0]);
     }
 
     public static Transaction createAndSign(PrivateKey priv, PublicKey from, PublicKey to, double amount) {
@@ -260,7 +273,12 @@ public class Transaction {
         }
     }
 
+    public boolean isCoinbase() {
+        return from == null;
+    }
+
     public boolean verify() {
+        if (isCoinbase()) return true; // coinbase لا تحتاج توقيع
         try {
             String payload = canonical(from, to, amount);
             Signature sig = Signature.getInstance("SHA256withECDSA");
@@ -273,9 +291,10 @@ public class Transaction {
     }
 
     public static String canonical(PublicKey from, PublicKey to, double amount) {
-        String f = Base64.getEncoder().encodeToString(from.getEncoded());
+        String f = (from == null) ? "COINBASE" :
+                Base64.getEncoder().encodeToString(from.getEncoded());
         String t = Base64.getEncoder().encodeToString(to.getEncoded());
-        return "{\"from\":\""+f+"\",\"to\":\""+t+"\",\"amount\":"+amount+"}";
+        return "{\"from\":\"" + f + "\",\"to\":\"" + t + "\",\"amount\":" + amount + "}";
     }
 
     public String getTxId(){ return txId; }
@@ -285,10 +304,9 @@ public class Transaction {
     public byte[] getSignature(){ return signature; }
 
     @Override public String toString() {
-        return "TX{"+txId.substring(0,8)+".., amount="+amount+"}";
+        return "TX{" + txId.substring(0, 8) + ".., amount=" + amount + "}";
     }
 }
-
 
 
 package com.decentra.chain;
@@ -327,5 +345,3 @@ public class Wallet {
         return Transaction.createAndSign(this.privateKey, this.publicKey, recipient, amount);
     }
 }
-
-
