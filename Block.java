@@ -37,9 +37,10 @@ public class Block {
         }
     }
 
+    // >>> التعديل هنا <<<
     public boolean validateTransactions() {
         for (Transaction t : transactions) {
-            if (!t.verify()) return false;
+            if (!t.isCoinbase() && !t.verify()) return false;
         }
         return true;
     }
